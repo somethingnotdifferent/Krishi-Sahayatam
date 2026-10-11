@@ -1,0 +1,107 @@
+# =============================================================================
+# smoke.yaml -- CPU-only end-to-end validation.
+#
+# Purpose: prove the ENTIRE pipeline works (load -> format -> mask -> LoRA ->
+# forward -> backward -> optimizer -> checkpoint -> reload -> generate) on a
+# machine with no GPU, in a few minutes, using a synthetic dataset whose answers
+# are computed rather than authored.
+#
+# This is the config CI and a fresh contributor should run first. It is NOT a
+# template for a real experiment: 4 steps, batch 1, 350M parameters, synthetic
+# arithmetic data.
+#
+#   uv run lfm-finetune init-synthetic --destination data/raw/synthetic
+#   uv run lfm-finetune prepare  -c configs/smoke.yaml
+#   uv run lfm-finetune train    -c configs/smoke.yaml --smoke-test
+# =============================================================================
+
+extends: lfm_sft.yaml
+
+run:
+  name: smoke
+  domain: synthetic
+  notes: >
+    CPU smoke test. Validates the pipeline, not model quality.
+
+model:
+  # Smallest credible LFM2.5 base checkpoint. ~0.7 GB bf16 / ~1.4 GB fp32.
+  # On a CPU-only host with <8 GB RAM this is the largest checkpoint that trains
+  # in reasonable time; drop to LiquidAI/LFM2.5-230M-Base if memory is tight.
+  name: LiquidAI/LFM2.5-350M-Base
+  # CPU bf16/fp16 matmul support is uneven across torch builds and falls back to
+  # slow paths, so CPU runs are pinned to fp32 by the loader regardless.
+  dtype: float32
+  device: cpu
+  # Gradient checkpointing slows CPU training noticeably and is unnecessary at
+  # 350M / seq 256 / batch 1.
+  gradient_checkpointing: false
+  attn_implementation: eager
+
+dataset:
+  path: data/raw/synthetic
+  format: auto
+  use_processed: true
+  processed_dir: data/splits
+  quality:
+    # Synthetic fixtures deliberately include a short answer ("4") so this is
+    # lowered; real datasets should keep the default of 8.
+    min_assistant_chars: 1
+    near_duplicate: false   # templates repeat by construction
+    remove_prompt_leakage: false
+  splitting:
+    strategy: hashed
+    # 60/20/20 keeps all three splits non-empty, so `baseline` and `evaluate`
+    # (which require a held-out TEST split) work on the smoke fixture too.
+    train_ratio: 0.6
+    validation_ratio: 0.2
+    seed: 42
+
+tokenization:
+  max_seq_length: 256
+  append_eos_token: true
+  truncation_strategy: keep_head_tail
+
+lora:
+  enabled: true
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: auto
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  # The smoke preset sets max_steps=4, batch 1, no checkpoint rotation and no
+  # eval loop, then train --smoke-test tightens it further.
+  preset: smoke
+  seed: 42
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-3
+  max_grad_norm: 1.0
+  logging_steps: 1
+  eval_strategy: "no"
+  # steps/2 rather than 'epoch': with max_steps=4 an epoch boundary may never be
+  # reached, and then no checkpoint would be written for the reload test.
+  save_strategy: "steps"
+  save_steps: 2
+  save_total_limit: 1
+  load_best_model_at_end: false
+  dataloader_pin_memory: false
+  dataloader_num_workers: 0
+  assistant_only_loss: true
+  packing: false
+
+evaluation:
+  num_samples: 4
+  max_new_tokens: 48
+  do_sample: false
+
+checkpointing:
+  dir: checkpoints
+  save_adapter_only: true
+  save_tokenizer: true
+
+export:
+  adapters_dir: adapters
+  merged_dir: merged

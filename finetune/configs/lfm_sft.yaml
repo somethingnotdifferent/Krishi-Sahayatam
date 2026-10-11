@@ -1,0 +1,129 @@
+# =============================================================================
+# lfm_sft.yaml -- LFM2 / LFM2.5-specific defaults.
+#
+# Inherits every structural field from base.yaml and overrides only what is
+# specific to Liquid's hybrid architecture. Domain configs inherit from this.
+#
+# The three overrides that matter for LFM2.5, and why:
+#
+#   1. lora.target_modules: auto
+#      LFM2 is a HYBRID model. Decoder layers alternate between Lfm2ShortConv
+#      (a depthwise Conv1d between two Linear projections) and Lfm2Attention
+#      (GQA). Module names do not match Llama/Qwen/Mistral:
+#        * attention output projection : self_attn.out_proj  (not "o_proj")
+#        * SwiGLU FFN                  : feed_forward.w1/w2/w3
+#                                      (not "gate_proj/up_proj/down_proj")
+#        * short-conv projections      : conv.in_proj / conv.out_proj
+#      A generic ["q_proj","v_proj"] recipe matches nothing. 'auto' derives the
+#      set from model.named_modules() and cross-checks it against Liquid's own
+#      reference preset (leap-finetune).
+#
+#   2. tokenization.append_eos_token: true
+#      Non-negotiable for LFM2.5. Every LFM2.5 template wraps each turn in
+#      ChatML control tokens -- <|im_start|> (id 6) and <|im_end|> (id 7) -- and
+#      eos_token_id IS 7 (<|im_end|>) for the 65,536-vocab checkpoints. The
+#      rendered text ends "<|im_end|>\n"; the trailing newline is stripped so the
+#      supervised target ends exactly at the terminator, matching generation.
+#      Gotcha: special_tokens_map.json registers ids 6/7 with an EMPTY content
+#      field, so reading that raw file makes the terminator look absent. The loaded
+#      tokenizer resolves eos_token to the end-of-turn marker; the id is what stops
+#      generation.
+#
+#   3. tokenization.max_seq_length: 2048 (not 128000)
+#      config.max_position_embeddings declares 128k, but LFM2.5 was trained on
+#      32,768. Domain SFT samples are short; a 2048 cap covers essentially all
+#      of them and keeps the logits tensor (batch x seq x 65536 vocab) small.
+# =============================================================================
+
+extends: base.yaml
+
+run:
+  name: lfm-sft
+  domain: generic
+
+model:
+  name: LiquidAI/LFM2.5-1.2B-Base
+  revision: main
+  dtype: auto
+  device: auto
+  attn_implementation: sdpa
+  gradient_checkpointing: true
+  use_cache: false
+  allow_unsupported_architecture: false
+
+tokenization:
+  max_seq_length: 2048
+  # null -> the template shipped with the exact checkpoint.
+  #
+  # MEASURED CAVEAT (docs/TRAINING.md has the full table): LFM2.5 templates are
+  # not uniform across sizes.
+  #   1.2B-Base, 350M-Base      -> template WITHOUT {% generation %} blocks
+  #   230M-Base, 2.6B-Base,
+  #   8B-A1B-Base, *-Instruct   -> template WITH {% generation %} blocks
+  # On the two without the blocks, apply_chat_template(...,
+  # return_assistant_tokens_mask=True) returns an ALL-ZERO mask (measured: 0 of
+  # 24 tokens), which silently supervises the entire prompt. TRL's
+  # assistant_only_loss=True inherits the same defect.
+  #
+  # This pipeline therefore derives the assistant span by PREFIX LENGTH --
+  # render messages[:-1] with add_generation_prompt=True, compare against the
+  # full render -- and ASSERTS the prefix property. That is correct for every
+  # LFM2.5 size and does not change if you swap 1.2B for 2.6B.
+  chat_template: null
+  append_eos_token: true
+  truncation_strategy: keep_head_tail
+  padding_side: right
+
+lora:
+  enabled: true
+  # r=16 / alpha=32 follows the common LoRA-SFT convention (alpha = 2r).
+  # Liquid's own reference presets are r=8/alpha=16 and r=16/alpha=32.
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: none
+  target_modules: auto
+  # Never adapt these on LFM2.5-*-Base: config.tie_embedding is true, so
+  # lm_head.weight IS model.embed_tokens.weight. Adapting one desynchronises
+  # the output distribution. Verified at load time.
+  exclude_modules:
+    - lm_head
+    - embed_tokens
+  modules_to_save: []
+  use_rslora: false
+  use_dora: false
+  max_trainable_pct: 25.0
+
+training:
+  preset: balanced
+  seed: 42
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  early_stopping_patience: null
+  assistant_only_loss: true
+  packing: false
+
+evaluation:
+  num_samples: 50
+  max_new_tokens: 320
+  do_sample: false
+  temperature: 0.0
+  seed: 42
+
+reproducibility:
+  seed: 42
+  dataset_split_seed: 42
