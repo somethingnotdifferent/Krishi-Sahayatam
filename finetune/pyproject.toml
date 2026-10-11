@@ -1,0 +1,103 @@
+[project]
+name = "lfm-sft"
+version = "0.1.0"
+description = "Production-grade LoRA/PEFT supervised fine-tuning pipeline for Liquid AI LFM2 / LFM2.5 checkpoints"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# Version policy
+# ----------------
+# The pins below follow the compatibility envelope validated by Liquid AI's own
+# open-source training stack (https://github.com/Liquid4All/leap-finetune) and the
+# official TRL fine-tuning docs (https://docs.liquid.ai/lfm/fine-tuning/trl):
+#
+#   torch       >=2.10.0,<2.12.0
+#   transformers >=5.3.0,<5.4.0      <- LFM2 (`Lfm2ForCausalLM`) + trl 1.9.0 are
+#                                       validated against the 5.3 line
+#   trl         ==1.9.0
+#   peft        >=0.15.2
+#   accelerate  >=1.7.0
+#
+# Do not float these to `latest`. transformers 5.x renamed several training APIs
+# (`tokenizer=` -> `processing_class=`, `max_length=` -> `max_length=` moved into
+# `dataset_kwargs`, dtype kwargs, ...). A newer transformers line can therefore
+# break an otherwise-working LFM training stack.
+dependencies = [
+    "torch>=2.10.0,<2.12.0",
+    "transformers>=5.3.0,<5.4.0",
+    "datasets>=4.0.0",
+    "trl==1.9.0",
+    "peft>=0.15.2",
+    "accelerate>=1.7.0",
+    "safetensors>=0.4.5",
+    "pyyaml>=6.0",
+    "pydantic>=2.7",
+    "numpy>=2.0",
+    "huggingface-hub>=0.34",
+    # Optional integrations -- imported lazily, never required at import time.
+    "wandb>=0.19",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Quantised training (QLoRA / 8-bit optimizer). NOT installed by default:
+# bitsandbytes has no CPU kernels for most configs and LFM2's hybrid conv blocks
+# are not a well-trodden QLoRA path. Enable only after verifying support for the
+# exact checkpoint + GPU combination you are on.
+quant = ["bitsandbytes>=0.45"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+lfm-finetune = "lfm_finetune.cli.main:main"
+
+[project.urls]
+"Documentation" = "https://docs.liquid.ai/lfm/fine-tuning/trl"
+"Liquid LFM2.5 blog" = "https://www.liquid.ai/blog/introducing-lfm2-5-the-next-generation-of-on-device-ai"
+"Liquid fine-tuning stack" = "https://github.com/Liquid4All/leap-finetune"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lfm_finetune"]
+
+[tool.uv]
+# torch is pinned to the CPU build by default so that a fresh `uv sync` on a
+# machine without CUDA does not pull ~3 GB of unused CUDA wheels. On a CUDA box
+# run:  uv sync --no-build-isolation && uv pip install --index-url https://download.pytorch.org/whl/cu126 torch
+# or simply delete this block and run `uv sync`.
+no-build-isolation-package = []
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that download a real LFM checkpoint (deselect with '-m \"not slow\"')",
+    "train: tests that actually run a training step",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
