@@ -1,0 +1,225 @@
+# =============================================================================
+# configs/agriculture/_domain.yaml -- MICO domain preset (shared by all sizes).
+#
+# This file holds everything that is specific to AGRICULTURE AS A DOMAIN, and
+# nothing that is specific to any model size or any machine. It is inherited by
+# lfm25_350m.yaml / lfm25_1.2b.yaml / lfm25_2.6b.yaml, which add only the model
+# and memory settings.
+#
+# DESIGN PRINCIPLE -- domain is data, not code
+# --------------------------------------------
+# The training engine has no knowledge of crops, diseases or India. Everything
+# domain-specific lives in configuration (the system prompt, the dataset, the
+# metadata keys) so that adding configs/finance/ or configs/education/ requires
+# new YAML and new JSONL, never a code change.
+#
+# The system prompt below is the single most important piece of it: it encodes
+# the BEHAVIOUR contract that the dataset's answers must satisfy. If the system
+# prompt says "ask before diagnosing" and 40% of the training answers diagnose
+# without asking, the model learns the dataset, not the prompt. Keep them
+# consistent.
+# =============================================================================
+
+extends: ../lfm_sft.yaml
+
+run:
+  name: mico-agriculture
+  domain: agriculture
+  tags: [mico, agriculture, sft, lora]
+
+model:
+  name: LiquidAI/LFM2.5-1.2B-Base
+  revision: main
+
+dataset:
+  # Replace with your own corpus. data/raw/synthetic is the pipeline fixture
+  # and contains NO agricultural knowledge -- training on it teaches arithmetic.
+  path: data/raw/synthetic
+  format: conversational
+
+  # ------------------------------------------------------------------ #
+  # The behaviour contract for a MICO-class agricultural assistant.
+  # ------------------------------------------------------------------ #
+  system_prompt: >-
+    You are MICO, an agricultural advisory assistant for smallholder farmers in
+    India. You help with crop diagnosis, symptom reasoning, nutrient deficiency,
+    pest identification, irrigation and general crop management.
+
+    How you must behave:
+
+    1. Diagnose, never guess. A single symptom is almost never enough to
+       identify a cause. Name the two or three most plausible causes and say
+       which additional detail would separate them.
+    2. Ask for what you are missing. Before committing to a diagnosis, get the
+       crop, the growth stage, the region and season, how the symptom is
+       distributed on the plant (leaves vs fruit vs stem; one plant or a patch),
+       and what has changed recently in weather, irrigation or inputs.
+    3. State uncertainty explicitly. Say what you are unsure about rather than
+       sounding confident. If the evidence genuinely points one way, say so and
+       say why.
+    4. Recommend safe, practical actions available to a smallholder, and give
+       them as ordered steps with an indication of timing.
+    5. Respect safety and legal limits. For any chemical input, name the active
+       ingredient rather than only a brand, mention pre-harvest intervals and
+       protective equipment, and note local restrictions if you know them.
+    6. Know your limits. For a pest or disease you cannot identify, or for a
+       serious or rapidly spreading problem, tell the farmer to contact a local
+       agriculture extension officer or Kisan Call Centre.
+    7. Be concise and plain. Short sentences, no jargon without a plain-language
+       gloss. The reader may have limited literacy and a second language.
+
+  quality:
+    # Domain-specific thresholds. Tighter than the generic defaults because a
+    # vague agricultural answer is actively harmful, not just unhelpful.
+    min_assistant_chars: 80      # "Apply fungicide." is not an acceptable answer
+    max_assistant_chars: 12000
+    min_user_chars: 4
+    min_messages: 2
+    max_turns: 16
+    remove_prompt_leakage: true
+    # Agreed answers to "how often should I water" recur legitimately across
+    # crops, so near-duplicate detection is tightened rather than loosened.
+    near_duplicate_threshold: 0.85
+    placeholder_patterns:
+      - '\bTODO\b'
+      - '\bFIXME\b'
+      - '\bplaceholder\b'
+      - '\bN/?A\b'
+      - '\bLorem ipsum\b'
+      - '<\|.*?\|>'
+      - '\b(as an AI|I am an AI language model)\b'
+
+  splitting:
+    strategy: hashed
+    train_ratio: 0.80
+    # Keep a real held-out test split. It must never be trained on, otherwise
+    # the base-vs-tuned comparison measures memorisation.
+    validation_ratio: 0.10
+    seed: 42
+
+tokenization:
+  # Diagnosis answers are long (ask -> reason -> action), and multilingual or
+  # Hindi-English mixed text tokenises into more tokens per character than
+  # English. 2048 covers the great majority; raise it if the p95 in the dataset
+  # report is close to the cap.
+  max_seq_length: 2048
+  append_eos_token: true
+  truncation_strategy: keep_head_tail
+
+lora:
+  enabled: true
+  # r=16 / alpha=32. Rank 16 gives enough capacity for a style + terminology
+  # shift without enough freedom to memorise a few thousand examples. Drop to
+  # r=8 if you have very little data; raise to 32 only with a large corpus.
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: none
+  target_modules: auto
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  preset: balanced
+  seed: 42
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  # LoRA SFT range. 2e-4 is the standard starting point; if validation loss
+  # diverges or the outputs become repetitive, drop to 1e-4.
+  learning_rate: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  # Only enable once you have seen the eval-loss curve; patience is counted in
+  # EVALUATIONS, so set it to roughly the number of evals per epoch.
+  early_stopping_patience: null
+  assistant_only_loss: true
+  packing: false
+
+evaluation:
+  # 50 held-out generations is enough to see behavioural shifts and is
+  # affordable on CPU for 350M. Raise to 200+ for a decision-grade comparison,
+  # and read the rubric sheet rather than the proxy numbers.
+  num_samples: 50
+  max_new_tokens: 384
+  # Greedy decoding: the base-vs-tuned comparison must be deterministic or
+  # differences are indistinguishable from sampling noise.
+  do_sample: false
+  temperature: 0.0
+  seed: 42
+  leakage_probe: true
+
+export:
+  # The adapter is the canonical MICO artifact: tens of MiB, and it pins the
+  # exact base checkpoint. Merge only at deployment time. See docs/DEPLOYMENT.md.
+  adapters_dir: adapters
+  merged_dir: merged
+  merge_in_bf16: true
+
+reproducibility:
+  seed: 42
+  dataset_split_seed: 42
+  hash_dataset: true
+
+# -----------------------------------------------------------------------------
+# DATASET CONTRACT (not consumed by the trainer; documentation for data authors)
+# -----------------------------------------------------------------------------
+#
+# Canonical record (see datasets/schema.json for the machine-readable version):
+#
+#   {
+#     "id": "agri-000123",
+#     "messages": [
+#       {"role": "system",    "content": "<the system prompt above>"},
+#       {"role": "user",      "content": "..."},
+#       {"role": "assistant", "content": "..."}
+#     ],
+#     "metadata": {
+#       "domain": "agriculture",
+#       "category": "diagnosis",
+#       "crop": "tomato", "plant": "solanum lycopersicum",
+#       "disease": "early_blight", "pest": null,
+#       "nutrient_issue": null, "growth_stage": "flowering",
+#       "symptom": ["dark brown concentric lesions", "lower leaves first"],
+#       "region": "IN-KA", "climate": "tropical_subhumid", "soil": "red_soil",
+#       "irrigation": "drip_3x_week", "treatment": "remove_infested_leaves",
+#       "confidence": 0.7, "source": "icar-extension-publication",
+#       "license": "CC-BY-4.0", "language": "en"
+#     }
+#   }
+#
+# Metadata is preserved for analysis and eval slicing and is NOT interpolated
+# into the prompt. Putting tags in the prompt is a deliberate per-dataset
+# decision; if you do it, the model must be trained AND evaluated that way or
+# the comparison is invalid.
+#
+# Categories the pipeline is designed to carry (data/io.py normalises all of
+# them identically; only the rubric distinguishes them):
+#   diagnosis_style_qa        symptom -> plausible causes -> next step
+#   symptom_reasoning         why does this symptom appear here and not there
+#   crop_management           spacing, staking, rotation, mulching, pruning
+#   pest_identification       distinguish look-alike damage
+#   nutrient_deficiency       visual deficiency signatures and corrections
+#   irrigation_guidance       scheduling, method, water stress
+#   weather_risk_reasoning    rainfall/heat/frost risk to a crop and its pests
+#   farmer_conversational     open-ended, multi-turn, low-literacy phrasing
+#   clarification_questions   correct behaviour when information is missing
+#   safety_uncertainty        chemical limits, PHI intervals, refusal to guess
+#   indian_terminology        correct local crop/input/unit vocabulary
+#   hindi_english_mixed       Devanagari-inflected queries (later phase)
+#
+# PROVENANCE RULES (enforced by data/io.validate_manifest):
+#   * every component records source + license
+#   * a dataset with license "unknown" is flagged loudly in the run manifest
+#   * no example may be authored by the model being trained
+#   * confidence is a human/curator judgement, not a model score
+#   * see datasets/README.md for the full checklist

@@ -1,0 +1,97 @@
+# =============================================================================
+# configs/agriculture/lfm25_1.2b.yaml -- MICO primary target.
+#
+# SELECTION RATIONALE
+# -------------------
+# LFM2.5-1.2B-Base is the right default for MICO:
+#
+#   * Quality   1.17B parameters, 28T training tokens, 10 convolution + 6 GQA
+#               layers. Enough capacity to absorb agricultural vocabulary and a
+#               response style without memorising a few thousand examples.
+#   * VRAM      ~2.4 GB in bf16. LoRA SFT at seq 2048 / batch 4 with gradient
+#               checkpointing peaks around 8-11 GB -> a single 12 GB card
+#               (RTX 3060 12G, RTX 4060 Ti 16G, A10, A100) or 2x8 GB.
+#   * Edge      Liquid's own "on-device" tier. GGUF and ONNX exports are published
+#               for this size; see docs/DEPLOYMENT.md. A 2.6B model is a gateway
+#               class device, not a handset class one.
+#   * Base vs   LFM2.5-1.2B-Instruct exists, but the model card recommends
+#     instruct   *-Base specifically for "heavy fine-tuning ... domain-specific
+#               (e.g. medical) assistants". Starting from Instruct means
+#               un-learning a general instruct prior using only domain data,
+#               which a small SFT set cannot do reliably. If you need
+#               general chat to survive, mix in general instruct data.
+#
+# MEMORY PROFILE (bf16, gradient checkpointing on, LoRA r=16)
+#   weights            2.34 GiB
+#   gradients (LoRA)   ~0.02 GiB
+#   AdamW moments      ~0.04 GiB
+#   activations         ~1.5 GiB at batch 4 x seq 2048 (recomputed)
+#   logits             ~1.0 GiB at batch 4 x seq 2048 x 65,536 vocab (fp32 CE)
+#   ------------------------------------------
+#   peak (batch 4)     ~5.0 GiB  -> fits 8 GB
+#   peak (batch 8)     ~8.5 GiB  -> needs 12 GB
+#
+# The trainer estimates and logs this before allocating; if the estimate exceeds
+# usable VRAM the run fails with concrete reduction advice instead of OOMing
+# 40 minutes in.
+# =============================================================================
+
+extends: _domain.yaml
+
+run:
+  name: agri_lfm25_1.2b
+  tags: [mico, agriculture, lfm2.5, 1.2b, lora]
+
+model:
+  name: LiquidAI/LFM2.5-1.2B-Base
+  # Pin a commit sha for a byte-reproducible run:
+  #   lfm-finetune inspect-model -c <cfg> then copy `revision` from the Hub.
+  revision: main
+  dtype: bfloat16
+  device: auto
+  attn_implementation: sdpa
+  gradient_checkpointing: true
+  use_cache: false
+
+tokenization:
+  max_seq_length: 2048
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: auto
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  preset: balanced
+  seed: 42
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  # effective batch = 4 x 4 = 16 sequences per optimizer step
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3
+  load_best_model_at_end: true
+  assistant_only_loss: true
+
+evaluation:
+  num_samples: 50
+  max_new_tokens: 384
+  do_sample: false
+
+checkpointing:
+  dir: checkpoints
+  save_adapter_only: true
+
+export:
+  adapters_dir: adapters
+  merged_dir: merged

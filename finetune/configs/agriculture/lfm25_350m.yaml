@@ -1,0 +1,88 @@
+# =============================================================================
+# configs/agriculture/lfm25_350m.yaml -- CPU-runnable / lowest-end device.
+#
+# TWO USES
+#   1. Validating the agriculture pipeline end to end on a CPU-only or small-GPU
+#      machine with a REAL dataset (not the synthetic fixture).
+#   2. Targeting genuinely low-end hardware where ~0.7 GB of weights is the
+#      binding constraint.
+#
+# WHAT YOU GIVE UP
+#   350M is the smallest LFM2.5 that Liquid publishes as a real base model. It
+#   will learn terminology and response STYLE well. It will be materially worse
+#   than 1.2B at multi-step causal reasoning, which is exactly what agricultural
+#   diagnosis requires. If you ship this, expect "it asks good clarifying
+#   questions" and "its confident answers are weaker than 1.2B's".
+#
+# MEMORY PROFILE (fp32 on CPU / bf16 on GPU, LoRA r=8)
+#   weights   1.33 GiB fp32   0.67 GiB bf16
+#   peak CPU  ~2.5 GiB at batch 1 x seq 1024, no gradient checkpointing
+#   peak GPU  ~3.5 GiB at batch 4 x seq 1024
+#
+# The fp32 note matters: on CPU, bf16 matmul falls back to slow paths in several
+# torch builds, so the loader silently forces float32 when device=cpu. On a GPU
+# it stays bf16.
+# =============================================================================
+
+extends: _domain.yaml
+
+run:
+  name: agri_lfm25_350m
+  tags: [mico, agriculture, lfm2.5, 350m, lora, cpu-ok]
+
+model:
+  name: LiquidAI/LFM2.5-350M-Base
+  revision: main
+  # 'auto' -> float32 on CPU, bfloat16 on Ampere+. That is the correct default
+  # for this config because the same file should work on both.
+  dtype: auto
+  device: auto
+  gradient_checkpointing: true
+  use_cache: false
+
+tokenization:
+  # 1024 rather than 2048: this config is the CPU/low-memory path, and the
+  # logits tensor (batch x seq x 65,536 vocab) scales linearly with seq.
+  max_seq_length: 1024
+  append_eos_token: true
+
+lora:
+  # Rank 8 rather than 16. On a 350M backbone a rank-16 adapter is a larger
+  # fraction of the model and will memorise a small dataset faster than it
+  # generalises. Liquid's own reference low-rank preset is r=8/alpha=16.
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: auto
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  preset: memory_saver
+  seed: 42
+  num_train_epochs: 3
+  # batch 1 x accum 16 == effective batch 16, matching lfm25_1.2b.yaml so the
+  # learning-rate schedule is comparable across model sizes.
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.05          # slightly longer: fewer optimizer steps
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 5
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 2
+  load_best_model_at_end: true
+  assistant_only_loss: true
+  dataloader_pin_memory: true
+
+evaluation:
+  num_samples: 30
+  max_new_tokens: 320
+  do_sample: false
+
+checkpointing:
+  dir: checkpoints
+  save_adapter_only: true

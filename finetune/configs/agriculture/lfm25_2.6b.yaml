@@ -1,0 +1,92 @@
+# =============================================================================
+# configs/agriculture/lfm25_2.6b.yaml -- higher-accuracy variant.
+#
+# WHEN TO USE THIS INSTEAD OF 1.2B
+#   * 1.2B's validation loss plateaus and error analysis shows genuine
+#     capability failures (wrong causal reasoning, not wrong vocabulary);
+#   * you need stronger multi-step agronomic reasoning than 1.2B provides;
+#   * the deployment target has ~6 GB of RAM available, not ~3 GB.
+#
+# WHEN NOT TO USE IT
+#   * The bottleneck is the DATA, not the model. A 2.6B model trained on 300
+#     examples will memorise them more efficiently, not generalise better.
+#     Fix the dataset first.
+#   * The deployment target is a handset or a low-cost edge node. See the edge
+#     class column below -- 2.6B moves you out of the on-device tier.
+#
+# COST COMPARISON (LoRA SFT, seq 2048, batch 4, 3 epochs, gradient ckpt on)
+#
+#   model      params  bf16 weights  peak VRAM   relative train   edge class
+#   1.2B       1.17B       2.34 GiB   ~5.0 GiB      1.0x          on-device
+#   2.6B       2.57B       4.85 GiB   ~9.5 GiB      ~2.4x         edge gateway
+#   8B-A1B     8.0B       15.3 GiB   ~26  GiB      MoE, not an edge target
+#
+# A single 24 GB card (RTX 4090 / L4 / A10G) runs this comfortably. Two 12 GB
+# cards also work; the trainer halves gradient accumulation per device so the
+# effective batch size is preserved.
+# =============================================================================
+
+extends: _domain.yaml
+
+run:
+  name: agri_lfm25_2.6b
+  tags: [mico, agriculture, lfm2.5, 2.6b, lora, gateway]
+
+model:
+  name: LiquidAI/LFM2.5-2.6B-Base
+  revision: main
+  dtype: bfloat16
+  device: auto
+  # 2.6B has 30 layers (20 conv + 10 attention blocks) and a 128k vocabulary,
+  # so the logits tensor is ~2x larger per token than the 1.2B. This is the
+  # dominant activation cost -- see the estimate logged at startup.
+  attn_implementation: sdpa
+  gradient_checkpointing: true
+  use_cache: false
+
+tokenization:
+  max_seq_length: 2048
+
+lora:
+  # Same rank as 1.2B: capacity scales with rank, not with model size, and a
+  # 2.6B needs LESS relative adaptation than a 1.2B for the same domain shift.
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: auto
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  preset: balanced
+  seed: 42
+  num_train_epochs: 3
+  # Halved versus 1.2B, with gradient accumulation doubled: the effective batch
+  # size stays at 16, so the learning-rate schedule remains comparable between
+  # the two configs and A/B results are not confounded by batch size.
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 2      # checkpoints are ~100 MiB each; keep disk bounded
+  load_best_model_at_end: true
+  assistant_only_loss: true
+
+evaluation:
+  num_samples: 50
+  max_new_tokens: 384
+  do_sample: false
+
+checkpointing:
+  dir: checkpoints
+  save_adapter_only: true
+
+export:
+  adapters_dir: adapters
+  merged_dir: merged

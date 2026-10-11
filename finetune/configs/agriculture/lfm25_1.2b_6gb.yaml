@@ -1,0 +1,142 @@
+# =============================================================================
+# configs/agriculture/lfm25_1.2b_6gb.yaml
+#
+# TARGET: a laptop RTX 4050 (Ada, compute capability 8.9) with 6 GB VRAM.
+#
+# IS 6 GB ENOUGH? Yes, for LoRA on LFM2.5-1.2B — with a reduced batch size.
+# =============================================================================
+#
+# WHAT ACTUALLY USES THE 6 GB
+#
+#   item                1.2B @ batch 1, seq 2048
+#   ---------------------------------------------------------------
+#   base weights (bf16)   2.34 GiB   <- the model itself, unavoidable
+#   LoRA gradients        0.04 GiB   <- tiny; this is the point of LoRA
+#   AdamW states          0.16 GiB   <- tiny
+#   activations (ckpt)    0.02 GiB   <- recomputed, so almost nothing stored
+#   logits (fp32 CE)      0.54 GiB   <- 65,536 vocab x seq, the hidden cost
+#   ---------------------------------------------------------------
+#   estimated             ~2.94 GiB
+#   real-world           ~4.2 GiB   (CUDA context, fragmentation, conv-block
+#                                      temporaries and the logits gradient,
+#                                      which the estimate above omits)
+#
+# The logits tensor, not the weights, is what scales with sequence length. That
+# is why max_seq_length is the knob to turn, not the learning rate.
+#
+# WHAT WAS CHANGED vs configs/agriculture/lfm25_1.2b.yaml
+#
+#   per_device_train_batch_size   4 -> 1     the only real change
+#   gradient_accumulation_steps   4 -> 16    effective batch stays 16, so the
+#                                            learning-rate schedule is
+#                                            IDENTICAL to the 12 GB config and
+#                                            A/B comparisons stay fair
+#   per_device_eval_batch_size    4 -> 1     eval doubles peak memory
+#   save_total_limit              3 -> 2     each adapter checkpoint is ~12 MiB,
+#                                            but eval/model copies add up
+#
+# WHAT WAS DELIBERATELY LEFT UNCHANGED
+#
+#   learning_rate 2e-4   A smaller per-device batch is NOT a reason to lower the
+#                       LR. Batch size and LR are separate knobs; changing both
+#                       makes runs incomparable with the 12 GB results.
+#   max_seq_length 2048  Fits. Lowering to 1024 halves peak memory if you hit
+#                       OOM, but truncates long diagnosis answers.
+#   lora r=16 alpha=32   Adapter size is independent of VRAM. Dropping to r=8
+#                       frees ~10 MB -- pointless. It would only cost quality.
+#
+# IF YOU HIT "CUDA out of memory"
+#   1. Close everything else using the GPU (browsers with hardware video
+#      acceleration, Discord screen share, other python processes).
+#      nvidia-smi shows what is holding VRAM.
+#   2. Drop tokenization.max_seq_length to 1024:
+#        uv run lfm-finetune train -c configs/agriculture/lfm25_1.2b_6gb.yaml \
+#          -s tokenization.max_seq_length=1024
+#   3. Confirm gradient checkpointing is on (it is):
+#        uv run lfm-finetune train -c configs/agriculture/lfm25_1.2b_6gb.yaml --dry-run
+#
+# LAPTOP-SPECIFIC WARNINGS
+#
+#   * Train plugged in. On battery the GPU is power-limited and can be several
+#     times slower.
+#   * Expect thermal throttling after 10-20 minutes. Clean the vents, use a
+#     cooling pad, and never train inside a closed bag or on a bed.
+#   * Laptop GPUs are memory-bandwidth bound here, so batch 1 x accum 16 is
+#     close to optimal: larger batches do not help much and cost VRAM.
+#   * Save your work before long runs; thermal shutdowns can kill the process.
+#
+# IF 6 GB IS NOT ENOUGH ANYWAY
+#   configs/agriculture/lfm25_350m.yaml needs ~1.3 GiB and trains several times
+#   faster. It is the right model for genuinely low-end hardware, though weaker
+#   at multi-step diagnosis than the 1.2B.
+# =============================================================================
+
+extends: _domain.yaml
+
+run:
+  name: agri_lfm25_1.2b_6gb
+  tags: [mico, agriculture, lfm2.5, 1.2b, lora, laptop, 6gb-vram]
+
+model:
+  name: LiquidAI/LFM2.5-1.2B-Base
+  revision: main
+  # bf16 is supported: the RTX 4050 is Ada (compute capability 8.9 >= 8.0).
+  # `auto` would also pick bf16 here, but being explicit keeps the run manifest
+  # unambiguous.
+  dtype: bfloat16
+  device: auto          # -> cuda
+  attn_implementation: sdpa
+  gradient_checkpointing: true
+  use_cache: false
+
+tokenization:
+  max_seq_length: 2048
+  append_eos_token: true
+  truncation_strategy: keep_head_tail
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: none
+  target_modules: auto            # -> feed_forward.w1/w2/w3, self_attn.*,
+                                   #    conv.in_proj/out_proj (discovered)
+  exclude_modules: [lm_head, embed_tokens]
+
+training:
+  preset: memory_saver
+  seed: 42
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16      # effective 16, identical to the 12 GB config
+  learning_rate: 2.0e-4                # unchanged on purpose
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  per_device_eval_batch_size: 1
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 2
+  load_best_model_at_end: true
+  assistant_only_loss: true
+  dataloader_num_workers: 2            # CPU-side work overlaps GPU compute
+  dataloader_pin_memory: true
+
+evaluation:
+  num_samples: 30                     # generation is slow on a laptop GPU
+  max_new_tokens: 384
+  do_sample: false                     # greedy: deterministic A/B comparison
+  batch_size: 1
+
+checkpointing:
+  dir: checkpoints
+  save_adapter_only: true
+  save_tokenizer: true
+
+export:
+  adapters_dir: adapters
+  merged_dir: merged
+  merge_in_bf16: true
