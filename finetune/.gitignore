@@ -1,0 +1,73 @@
+# ---- secrets: never commit ------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+hf_token.txt
+
+# ---- model weights & adapters (large binaries) ----------------------------
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+*.onnx
+*.tflite
+*.mlmodel
+*.npz
+models/
+!src/**/testdata/**
+
+# ---- datasets: keep schema/examples, ignore real corpora ------------------
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/synthetic/README.md
+data/processed/*
+!data/processed/.gitkeep
+data/validated/*
+!data/validated/.gitkeep
+data/splits/*
+!data/splits/.gitkeep
+datasets/**/*.jsonl
+!datasets/TEMPLATE_dataset.jsonl
+!datasets/examples/*.jsonl
+*.parquet
+*.arrow
+
+# ---- run artifacts ---------------------------------------------------------
+checkpoints/
+outputs/
+adapters/
+merged/
+evaluations/
+logs/
+!adapters/README.md
+!merged/.gitkeep
+wandb/
+mlruns/
+*.log
+
+# ---- python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# ---- tooling caches -------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# ---- OS -------------------------------------------------------------------
+.DS_Store
+Thumbs.db
