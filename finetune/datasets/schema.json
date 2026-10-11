@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://krishi-sahayatam.invalid/schemas/mico-sft-record-v1.json",
+  "title": "MICO / Krishi-Sahayatam canonical SFT record",
+  "description": "One trainable conversational example for domain Supervised Fine-Tuning. This is the ONLY format the trainer consumes; raw corpora in other shapes are normalised by lfm_finetune.data.io.convert_record before validation. Domain metadata is preserved for analysis and evaluation slicing but is NOT interpolated into the prompt by default.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["messages"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable unique identifier. Used for content hashing, split reproducibility and evaluation disjointness checks. Auto-generated from the source filename and row index when absent.",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "messages": {
+      "type": "array",
+      "description": "Ordered conversation. Must contain at least one user turn followed by an assistant turn, otherwise the row is rejected as missing_turn.",
+      "minItems": 2,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": ["role", "content"],
+        "additionalProperties": true,
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant", "tool"],
+            "description": "Canonical roles. Aliases accepted at ingestion and normalised: human/usr/prompter->user, gpt/bot/model->assistant, observation/function->tool. At most ONE system message is allowed, and it must be messages[0]."
+          },
+          "content": {
+            "type": "string",
+            "description": "Turn text. Must not be empty after normalisation. Normalisation performs NFC unicode folding, control-character and zero-width stripping, HTML tag removal, whitespace collapsing, and newline normalisation.",
+            "minLength": 1
+          },
+          "tool_calls": {
+            "type": "array",
+            "description": "Optional native tool calls. The LFM2.5 chat template renders these, so training on them teaches the model's own tool-call format rather than an OpenAI-compatible one.",
+            "items": {"type": "object"}
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional tool name, used with role=tool."
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Structured domain tags. Never placed in the prompt unless dataset injection is explicitly enabled. All fields optional.",
+      "additionalProperties": true,
+      "properties": {
+        "domain": {"type": "string", "description": "e.g. agriculture", "examples": ["agriculture"]},
+        "category": {
+          "type": "string",
+          "description": "Task category; the primary axis for evaluation slicing.",
+          "examples": [
+            "diagnosis_style_qa",
+            "symptom_reasoning",
+            "crop_management",
+            "pest_identification",
+            "nutrient_deficiency",
+            "irrigation_guidance",
+            "weather_risk_reasoning",
+            "farmer_conversational",
+            "clarification_questions",
+            "safety_uncertainty",
+            "indian_terminology",
+            "hindi_english_mixed"
+          ]
+        },
+        "crop": {"type": "string", "description": "Crop name, English common name.", "examples": ["tomato", "rice", "wheat", "sugarcane"]},
+        "plant": {"type": "string", "description": "Scientific name.", "examples": ["Solanum lycopersicum"]},
+        "disease": {"type": ["string", "null"], "description": "Disease name, or null when not applicable/unknown."},
+        "pest": {"type": ["string", "null"], "description": "Pest name, or null."},
+        "nutrient_issue": {"type": ["string", "null"], "description": "e.g. nitrogen_deficiency, zinc_deficiency."},
+        "growth_stage": {"type": ["string", "null"], "description": "e.g. seedling, vegetative, flowering, fruiting, maturity."},
+        "symptom": {
+          "type": ["array", "null"],
+          "description": "Observed symptoms as separate atoms, so symptom co-occurrence can be analysed.",
+          "items": {"type": "string"}
+        },
+        "region": {"type": "string", "description": "Subnational region code or name.", "examples": ["IN-KA", "IN-PB", "IN-MH"]},
+        "climate": {"type": ["string", "null"], "description": "e.g. tropical_subhumid, arid, temperate."},
+        "soil": {"type": ["string", "null"], "description": "e.g. red_soil, alluvial, black, sandy."},
+        "irrigation": {"type": ["string", "null"], "description": "Method and frequency if known.", "examples": ["drip_3x_week"]},
+        "treatment": {"type": ["string", "null"], "description": "Recommended action. Record the ACTIVE INGREDIENT, not a brand name."},
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Curator/human confidence in the label. MUST NOT be a model-generated score."
+        },
+        "source": {
+          "type": "string",
+          "description": "Provenance of the example. Required by policy; a dataset with unknown source is flagged in the run manifest.",
+          "examples": ["icar-extension-publication", "state-agri-university-extension", "farmer-interview-2026q1"]
+        },
+        "license": {
+          "type": "string",
+          "description": "SPDX identifier or explicit 'internal-use-only'. license='unknown' triggers a loud provenance warning.",
+          "examples": ["CC-BY-4.0", "CC0-1.0", "ODbL-1.0", "internal-use-only"]
+        },
+        "language": {"type": "string", "description": "BCP-47 code.", "examples": ["en", "hi", "hing"]},
+        "synthetic": {
+          "type": "boolean",
+          "description": "True for generated fixtures. Synthetic data must never be presented as real agricultural knowledge."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "At least one user turn must exist.",
+      "properties": {
+        "messages": {
+          "contains": {
+            "type": "object",
+            "required": ["role"],
+            "properties": {"role": {"const": "user"}}
+          },
+          "minContains": 1
+        }
+      }
+    },
+    {
+      "$comment": "At least one assistant turn must exist (the supervised target).",
+      "properties": {
+        "messages": {
+          "contains": {
+            "type": "object",
+            "required": ["role"],
+            "properties": {"role": {"const": "assistant"}}
+          },
+          "minContains": 1
+        }
+      }
+    },
+    {
+      "$comment": "The assistant turn must come after the first user turn; a record ending in a user turn has no supervised target.",
+      "properties": {
+        "messages": {
+          "contains": {
+            "type": "object",
+            "required": ["role"],
+            "properties": {"role": {"const": "assistant"}}
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "id": "agri-000001",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are MICO, an agricultural advisory assistant for smallholder farmers in India."
+        },
+        {
+          "role": "user",
+          "content": "My tomato plants have dark brown spots with rings on the lower leaves. What should I check?"
+        },
+        {
+          "role": "assistant",
+          "content": "Ring-shaped spots starting on the lower leaves could be early blight or a nutrient issue. Two details would separate them: does the lesion centre dry out and crack, and is it spreading fast after recent wet weather? Check also whether potassium deficiency is present, since that also starts on older leaves. Meanwhile remove and destroy affected leaves, avoid overhead watering, and if it does spread, contact your extension officer about a protectant registered for tomato in your state."
+        }
+      ],
+      "metadata": {
+        "domain": "agriculture",
+        "category": "diagnosis_style_qa",
+        "crop": "tomato",
+        "plant": "Solanum lycopersicum",
+        "disease": null,
+        "pest": null,
+        "nutrient_issue": null,
+        "growth_stage": "vegetative",
+        "symptom": ["dark brown concentric lesions", "lower leaves first"],
+        "region": "IN-KA",
+        "climate": "tropical_subhumid",
+        "soil": "red_soil",
+        "irrigation": "drip_3x_week",
+        "treatment": "remove_infested_leaves; avoid_overhead_watering",
+        "confidence": 0.6,
+        "source": "icar-extension-publication",
+        "license": "CC-BY-4.0",
+        "language": "en"
+      }
+    }
+  ]
+}

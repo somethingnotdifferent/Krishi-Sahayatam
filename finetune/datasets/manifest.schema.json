@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dataset provenance manifest",
+  "description": "Companion to each raw corpus. Required by project policy: training on data of unknown provenance is not acceptable, so license and source must be stated. Place next to the raw file as manifest.yaml or manifest.json; the pipeline reads it during `prepare` and warns loudly when a field is missing.",
+  "type": "object",
+  "required": ["name", "version", "source", "license", "created", "num_examples", "content_hash"],
+  "additionalProperties": true,
+  "properties": {
+    "name": {"type": "string", "description": "Dataset name.", "examples": ["mico-agriculture-core"]},
+    "version": {"type": "string", "description": "Version string. Bump on any content change.", "examples": ["0.4.0"]},
+    "source": {
+      "type": "string",
+      "description": "Where the data came from. Be specific enough to re-acquire or audit.",
+      "examples": ["ICAR annual reports 2019-2025", "state agriculture university extension bulletins", "structured farmer interviews, 6 districts, 2026 Q1"]
+    },
+    "license": {
+      "type": "string",
+      "description": "SPDX identifier, or 'internal-use-only'. The value 'unknown' is treated as a provenance failure and reported in every run manifest.",
+      "examples": ["CC-BY-4.0", "ODbL-1.0", "CC0-1.0", "internal-use-only"]
+    },
+    "created": {"type": "string", "description": "Creation date, ISO-8601.", "examples": ["2026-01-15"]},
+    "num_examples": {"type": "integer", "minimum": 0},
+    "content_hash": {
+      "type": "string",
+      "description": "Content hash of the canonical serialised records. Set automatically by `prepare`; recorded in run manifests so a result can be tied to an exact dataset state.",
+      "examples": ["9f2c1ab4de77e0c1"]
+    },
+    "categories": {
+      "type": "array",
+      "description": "Task categories present, for coverage auditing.",
+      "items": {"type": "string"}
+    },
+    "language": {"type": "array", "items": {"type": "string"}, "examples": [["en", "hi"]]},
+    "annotation_method": {
+      "type": "string",
+      "description": "How labels/answers were produced. State explicitly whether a human, an LLM, or a rule produced them. Never label model-generated text as human-annotated.",
+      "examples": ["reviewed by 2 agronomists, disagreements adjudicated by a third",
+                   "synthesised by an LLM and NOT reviewed -- research only",
+                   "extracted verbatim from published extension bulletins"]
+    },
+    "provenance_notes": {"type": ["string", "null"]},
+    "synthetic": {"type": "boolean", "description": "True for generated fixtures."},
+    "review_status": {
+      "type": ["string", "null"],
+      "description": "e.g. 'unreviewed', 'single-review', 'double-reviewed', 'adjudicated'.",
+      "examples": ["double-reviewed"]
+    },
+    "known_limitations": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "description": "Known bias or coverage gaps. Record them; do not hide them."
+    }
+  }
+}
