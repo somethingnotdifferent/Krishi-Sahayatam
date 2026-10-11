@@ -1,0 +1,323 @@
+# =============================================================================
+# base.yaml -- complete reference configuration.
+#
+# Every field the pipeline understands is present here with a comment. Domain
+# configs (configs/agriculture/*.yaml) inherit from this file and override only
+# what differs, so this file is also the schema documentation.
+#
+# Chain:  configs/agriculture/lfm25_1.2b.yaml
+#              extends lfm_sft.yaml
+#                          extends base.yaml
+#
+# Override precedence (low -> high):
+#   dataclass defaults  <  base.yaml  <  lfm_sft.yaml  <  agriculture/*.yaml
+#                        <  LFM_* env vars  <  --set KEY.PATH=VALUE
+# `training.preset` is applied after the YAML merge, before explicit fields in
+# the same file, so an explicit key always beats the preset.
+# =============================================================================
+
+schema_version: "1.0"
+
+run:
+  # Experiment name. Must match ^[A-Za-z0-9][A-Za-z0-9._-]*$.
+  name: base-experiment
+  # Logical domain. Purely organisational: agriculture/finance/education are all
+  # the same code path with different data and prompts.
+  domain: generic
+  notes: null
+  tags: []
+
+model:
+  # Base checkpoint. For DOMAIN ADAPTATION start from a *-Base checkpoint, not
+  # an instruct model: the base model has spent its budget on pretraining, and
+  # re-teaching it to follow instructions is exactly what SFT on a small domain
+  # dataset cannot do reliably.
+  #
+  # Validated LFM2.5 base checkpoints (all ship chat_template.jinja):
+  #   LiquidAI/LFM2.5-230M-Base    ~0.7 GB bf16   ultra-low-end edge
+  #   LiquidAI/LFM2.5-350M-Base    ~0.7 GB bf16   low-end edge / CPU CI
+  #   LiquidAI/LFM2.5-1.2B-Base    ~2.4 GB bf16   MICO-class on-device target
+  #   LiquidAI/LFM2.5-2.6B-Base    ~5.2 GB bf16   edge gateway
+  #   LiquidAI/LFM2.5-8B-A1B-Base  MoE            not an edge target
+  #
+  # Run `lfm-finetune recommend-model` to rank these for the current host.
+  name: LiquidAI/LFM2.5-1.2B-Base
+  # Pin a commit sha for byte-reproducible runs. 'main' can move under you.
+  revision: main
+
+  # auto -> bfloat16 on Ampere+ GPU, float16 on older GPUs, float32 on CPU.
+  # Prefer an explicit value in production so the manifest is unambiguous.
+  dtype: auto
+  # auto -> cuda when available, else cpu.
+  device: auto
+  # Only for genuinely custom checkpoints you have audited. LFM2 is native to
+  # transformers >= 4.57, so this should stay false.
+  trust_remote_code: false
+  # sdpa is the safe default. flash_attention_2 is used only if the wheel is
+  # actually importable; otherwise the loader falls back to sdpa with a warning.
+  attn_implementation: sdpa
+  # Recompute activations in the backward pass: ~30% more compute for a large
+  # activation-memory saving. Effectively required on 8-12 GB cards.
+  gradient_checkpointing: true
+  # Must stay false for training; the trainer re-enables it for generation.
+  use_cache: false
+  low_cpu_mem_usage: true
+  # Escape hatch. When false (default) the loader refuses any architecture that
+  # is not Lfm2*, which is what stops an LFM config being applied to a Llama.
+  allow_unsupported_architecture: false
+  local_files_only: false
+
+dataset:
+  path: data/raw/synthetic
+  # conversational -> {"messages": [...]}
+  # instruction   -> instruction/input/output, prompt/completion, question/answer
+  # auto          -> sniff each record independently and normalise
+  format: auto
+  # System prompt injected as messages[0] when a record has none. Per-domain;
+  # never hard-coded in the trainer.
+  system_prompt: null
+
+  train_split: train
+  validation_split: validation
+  test_split: test
+  # Consume data/splits/*.jsonl produced by `lfm-finetune prepare`.
+  use_processed: true
+  processed_dir: data/splits
+  # Deterministic subsample caps (pilot runs). null = use everything.
+  max_train_examples: null
+  max_eval_examples: null
+
+  quality:
+    min_user_chars: 2
+    min_assistant_chars: 8
+    max_user_chars: 8000
+    max_assistant_chars: 16000
+    min_messages: 2
+    max_turns: 32
+    drop_empty_messages: true
+    normalize_whitespace: true
+    # Removes C0/C1 control characters, lone surrogates and zero-width chars.
+    # Broken Unicode in an agricultural corpus (typically OCR'd Hindi text) is
+    # a real and common failure mode.
+    strip_control_characters: true
+    strip_html: true
+    deduplicate: true
+    # Character 5-gram Jaccard. Catches templated paraphrase duplicates that
+    # exact hashing misses.
+    near_duplicate: true
+    near_duplicate_threshold: 0.90
+    remove_prompt_leakage: true
+    check_train_val_overlap: true
+    # Matches mark a record as unfinished/unusable and reject it.
+    placeholder_patterns:
+      - '\bTODO\b'
+      - '\bFIXME\b'
+      - '\bXXX+\b'
+      - '\bLorem ipsum\b'
+      - '\bplaceholder\b'
+      - '\bTBD\b'
+      - '<\|.*?\|>'
+      - '\[insert .*?\]'
+
+  splitting:
+    # hashed: split is content-addressed, so adding examples never moves an
+    #         existing example between splits (a recorded val score stays valid).
+    # sequential: faster, fragile under dataset growth.
+    strategy: hashed
+    train_ratio: 0.8
+    # test_ratio = 1 - train_ratio - validation_ratio. Keep > 0 so the
+    # evaluation set can never be touched by training.
+    validation_ratio: 0.1
+    seed: 42
+
+tokenization:
+  # Prompt + response cap. Truncation keeps head+tail so the final assistant
+  # turn (the supervised span) is never the thing that gets cut.
+  max_seq_length: 1024
+  # null -> use the chat template shipped with the exact checkpoint. Always the
+  # right choice; only set this if you have audited a template you wrote.
+  #
+  # The LFM2.5 templates are NOT uniform across sizes: 1.2B-Base and 350M-Base
+  # ship one WITHOUT {% generation %} blocks, while 230M-Base, 2.6B-Base,
+  # 8B-A1B-Base and the Instruct variants include them. Consequence, measured:
+  #   apply_chat_template(return_assistant_tokens_mask=True)
+  #     LFM2.5-1.2B-Base -> 0 tokens masked   <-- silently trains on everything
+  #     LFM2.5-230M-Base -> 7 tokens masked, answer covered
+  # This pipeline masks by PREFIX LENGTH instead, which is correct for every
+  # size. See docs/TRAINING.md and training/tokenization.py.
+  chat_template: null
+  # keep_head_tail (default) | truncate_tail | error
+  truncation_strategy: keep_head_tail
+  padding_side: right
+  # Ensure the supervised target ends with the checkpoint's eos_token_id.
+  # For LFM2.5 that is <|im_end|>: id 7 on the 65,536-vocab checkpoints
+  # (1.2B/350M/230M) and 124900 on the 128k ones (2.6B/8B-A1B).
+  #
+  # The template already emits <|im_end|> after the final turn, followed by a
+  # literal newline. The trailing newline is stripped first, so the target ends
+  # exactly at the terminator -- which is what generation stops on. Leaving it
+  # in would train the model to emit the stop token and then keep going.
+  # Keep this true for LFM2/LFM2.5.
+  append_eos_token: true
+  # Must stay false for SFT (this is a prompt-continuation objective only).
+  add_generation_prompt_in_training: false
+  compute_token_stats_on: all
+
+lora:
+  enabled: true
+  # Rank. Liquid's reference preset is r=8/alpha=16; r=16 is the common
+  # default elsewhere. Higher = more adapter capacity, slower, more likely to
+  # memorise a small dataset.
+  r: 16
+  # Scaling numerator. Effective update scale = alpha / r, so alpha = 2r is the
+  # convention. alpha << r means a tiny effective LR and training stalls.
+  alpha: 32
+  # Adapter dropout. A light regulariser; Liquid's preset uses 0.1.
+  dropout: 0.05
+  # 'none' is correct for LFM2.5: conv_bias is false in the checkpoint config,
+  # so there is no bias tensor worth adapting.
+  bias: none
+  # 'auto' discovers targets from model.named_modules(). Never hard-code generic
+  # names: on LFM2.5 the attention output projection is `self_attn.out_proj`
+  # (NOT `o_proj`) and the FFN is `feed_forward.w1/w2/w3` (NOT
+  # `gate_proj/up_proj/down_proj`).
+  target_modules: auto
+  # Suffixes never targeted. lm_head/embed_tokens are weight-tied on
+  # LFM2.5-*-Base (tie_embedding: true); adapting either breaks the tie.
+  exclude_modules: []
+  modules_to_save: []
+  # Rank-stabilised scaling alpha/sqrt(r). Only worth it at high r / low alpha.
+  use_rslora: false
+  # DoRA: ~30-50% slower. Try only after plain LoRA plateaus.
+  use_dora: false
+  task_type: CAUSAL_LM
+  fan_in_fan_out: false
+  init_lora_weights: "true"
+  layers_to_transform: null
+  layers_pattern: null
+  # Fail fast if more than this share of parameters becomes trainable.
+  max_trainable_pct: 25.0
+  min_trainable_params: 1024
+
+training:
+  # preset: pilot | balanced | memory_saver | full | smoke
+  # Applied before explicit fields below, so anything set here wins.
+  preset: null
+  seed: 42
+  deterministic_algorithms: false
+
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: null      # null -> same as train
+  gradient_accumulation_steps: 4
+  # Effective batch = per_device * grad_accum * world_size.
+  # LoRA SFT typically uses 1e-4 .. 3e-4.
+  learning_rate: 2.0e-4
+  # LoRA conventionally uses 0.0: decay on adapter weights is mostly an extra
+  # regulariser and interacts badly with alpha/r scaling.
+  weight_decay: 0.0
+  # Linear warmup over this fraction of total steps.
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  # >0 overrides num_train_epochs. Used by pilot/smoke runs.
+  max_steps: -1
+  stop_after_steps: null
+
+  logging_steps: 10
+  eval_strategy: "steps"    # "no" | "steps" | "epoch"  (QUOTE "no": YAML 1.1 reads bare no as False)
+  eval_steps: 50
+  save_strategy: "steps"    # "no" | "steps" | "epoch"
+  save_steps: 50
+  save_total_limit: 3       # keep only the newest N checkpoints
+  # Restore the checkpoint with the best eval_loss at the end of training.
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  early_stopping_patience: null
+
+  gradient_checkpointing: null   # null -> model.gradient_checkpointing
+  optim: adamw_torch
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  lr_scheduler_kwargs: {}
+
+  resume_from_checkpoint: null   # path, or 'auto' for the latest checkpoint-*
+  dataloader_num_workers: 0
+  dataloader_pin_memory: true
+  remove_unused_columns: true
+  # e.g. ['wandb']. W&B needs WANDB_API_KEY in the environment; local
+  # metrics.jsonl logging is always on and requires no external service.
+  report_to: []
+  run_name: null
+  output_dir: null                # null -> checkpointing.dir/<run>_<timestamp>
+
+  # Concatenating examples into one window removes per-example boundaries and
+  # lets one step span two unrelated domains. Leave off for a first SFT run.
+  packing: false
+  # Train only on assistant response tokens. The prompt is not the target.
+  assistant_only_loss: true
+  include_prompt_tokens_in_loss: false
+  # Every N steps, generate from a fixed held-out prompt (0 = off).
+  sample_generation_steps: 0
+  smoke_test: false
+
+evaluation:
+  # Held-out (test) examples to generate on. The test split is never trained on.
+  num_samples: 50
+  max_new_tokens: 320
+  # 0 + do_sample=false -> greedy decoding: fully reproducible A/B comparison.
+  temperature: 0.0
+  top_p: 1.0
+  top_k: 0
+  repetition_penalty: 1.0
+  do_sample: false
+  batch_size: 1
+  num_beams: 1
+  seed: 42
+  # JSON rubric of domain dimensions for human scoring. Optional.
+  rubric_path: null
+  leakage_probe: true
+  max_bleu_probes: 20
+
+logging:
+  level: INFO
+  log_dir: logs
+  per_run_file: true
+  jsonl_metrics: true
+  capture_warnings: true
+
+checkpointing:
+  dir: checkpoints
+  keep_last: 3
+  save_adapter_only: true
+  save_tokenizer: true
+  # Freeze the fully-resolved config into the run directory so the run never
+  # depends on mutable external YAML.
+  save_resolved_config: true
+  metadata_filename: run_metadata.json
+
+export:
+  adapters_dir: adapters
+  merged_dir: merged
+  safe_serialization: true
+  max_shard_size: 4GB
+  # Requires an explicit HF_TOKEN in the environment. Off by default.
+  push_to_hub: false
+  hub_repo_id: null
+  # bf16 keeps merged weights bit-identical to how they were trained.
+  merge_in_bf16: true
+  export_tokenizer: true
+
+reproducibility:
+  seed: 42
+  # Must equal dataset.splitting.seed; a mismatch is rejected at load time.
+  dataset_split_seed: 42
+  deterministic_algorithms: false
+  record_environment: true
+  record_hardware: true
+  record_git: true
+  # Content-hash the processed splits into the run manifest.
+  hash_dataset: true
+  save_seed_state: true
