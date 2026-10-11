@@ -1,0 +1,108 @@
+# =============================================================================
+# datasets/TEMPLATE_manifest.yaml
+#
+# COPY THIS FILE next to your corpus and fill it in. Name it `manifest.yaml`.
+#
+#   data/raw/mico-agriculture/
+#       my-corpus.jsonl        <- your data
+#       manifest.yaml          <- this file, filled in
+#
+# WHY THIS FILE IS REQUIRED
+#
+# The pipeline reports provenance problems into data/validated/report.json and
+# into every training run's run_metadata.json. A corpus with no manifest, or with
+# `license: unknown`, is visibly incomplete forever after. Fill this in now, not
+# after you have forgotten where a third of the data came from.
+#
+# MINIMUM TO SATISFY THE PIPELINE:  name, version, source, license, created,
+# num_examples, content_hash.  Everything else is strongly recommended.
+# =============================================================================
+
+# ---- identity ---------------------------------------------------------------
+name: mico-agriculture
+# Bump this whenever content changes. Old runs reference the version they used.
+version: 0.1.0
+
+# ---- where it came from -----------------------------------------------------
+# Be specific enough that someone could re-acquire or audit the data.
+# "ICAR annual reports 2019-2025" is useful. "the internet" is not.
+source: >-
+  <FILL IN> e.g. "ICAR annual reports 2019-2025; state agriculture university
+  extension bulletins for Karnataka and Punjab; structured farmer interviews,
+  6 districts, 2026 Q1"
+
+# If the corpus is assembled from several sources with DIFFERENT licences, either
+# split into separate corpora with separate manifests (recommended), or list them:
+# licenses_by_source:
+#   - source: "ICAR reports"
+#     license: "CC-BY-4.0"
+#   - source: "farmer interviews"
+#     license: "internal-use-only"
+
+# ---- licence ---------------------------------------------------------------
+# SPDX identifier, or the literal string "internal-use-only".
+#   CC0-1.0 / CC-BY-4.0 / CC-BY-SA-4.0 / ODbL-1.0 / MIT / proprietary
+#
+# The value "unknown" is treated as a provenance failure and is flagged loudly.
+# Do not use it. If you genuinely do not know the licence of a source, that
+# source is not ready to train on.
+license: <FILL IN>   # e.g. CC-BY-4.0
+
+# ---- when -------------------------------------------------------------------
+created: <FILL IN>   # ISO date, e.g. 2026-01-15
+
+# ---- size ------------------------------------------------------------------
+# `prepare` fills this in automatically, along with `content_hash` and
+# `prepared_at`. You do not need to compute it by hand.
+num_examples: 0
+
+# ---- what is inside ---------------------------------------------------------
+# Task categories present, for coverage auditing. Use the vocabulary in
+# configs/agriculture/_domain.yaml and docs/DATASET.md.
+categories:
+  - diagnosis_style_qa
+  - clarification_questions
+  - safety_uncertainty
+  # - symptom_reasoning
+  # - crop_management
+  # - pest_identification
+  # - nutrient_deficiency
+  # - irrigation_guidance
+  # - weather_risk_reasoning
+  # - farmer_conversational
+  # - indian_terminology
+  # - hindi_english_mixed
+
+language:
+  - en
+  # - hi
+  # - hing
+
+# ---- how the answers were produced ------------------------------------------
+# State this plainly. Do not claim human authorship of machine-generated text.
+#
+#   "extracted verbatim from published extension bulletins"
+#   "authored by an agronomist, reviewed by a second agronomist"
+#   "reviewed by 2 agronomists, disagreements adjudicated by a third"
+#   "synthesised by an LLM and NOT reviewed -- research only, not for deployment"
+annotation_method: <FILL IN>
+
+review_status: <FILL IN>   # unreviewed | single-review | double-reviewed | adjudicated
+
+# ---- honest limitations -----------------------------------------------------
+# Record bias and gaps. They will not go away by being unmentioned.
+known_limitations:
+  - <FILL IN> e.g. "under-represented in coconut and arecanut"
+  # - "symptom descriptions normalised to English, losing original Hindi phrasing"
+  # - "region skew: 60% of examples are from two districts"
+  # - "no examples of the kharif season"
+
+# ---- flags -----------------------------------------------------------------
+# Leave false for a human-authored corpus. Set true for generated fixtures.
+synthetic: false
+
+# ---- per-record provenance --------------------------------------------------
+# Also required, on every record, inside `metadata`:
+#   metadata.source   -- which source this record came from
+#   metadata.license  -- the licence covering this record
+#   metadata.confidence -- a HUMAN judgement in [0,1], never a model score
